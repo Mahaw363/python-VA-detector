@@ -42,6 +42,7 @@ def analyse_code(source):
 
         # Bandit may return 1 when findings are detected.
         if process.returncode not in (0, 1):
+            st.code(process.stderr or "No error details returned.")
             raise RuntimeError("Bandit could not complete the analysis.")
 
         report = json.loads(process.stdout)
