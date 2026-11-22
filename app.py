@@ -16,9 +16,11 @@ st.set_page_config(
 
 
 def analyse_code(source):
-    # Submitted code is written as text and never executed.
     with tempfile.TemporaryDirectory() as folder:
         code_file = Path(folder) / "submitted_code.py"
+        report_file = Path(folder) / "report.json"
+
+        # Save the submitted code as text. Never execute it.
         code_file.write_text(source, encoding="utf-8")
 
         process = subprocess.run(
@@ -28,6 +30,8 @@ def analyse_code(source):
                 "bandit",
                 "-f",
                 "json",
+                "-o",
+                str(report_file),
                 "-q",
                 "--ignore-nosec",
                 str(code_file),
@@ -35,39 +39,73 @@ def analyse_code(source):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
             cwd=folder,
         )
 
-        # Bandit may return 1 when findings are detected.
         if process.returncode not in (0, 1):
-            st.code(process.stderr or "No error details returned.")
-            raise RuntimeError("Bandit could not complete the analysis.")
+            details = process.stderr.strip()
+            raise RuntimeError(
+                f"Bandit exit code: {process.returncode}\n"
+                f"{details or 'No diagnostic message returned.'}"
+            )
 
-        report = json.loads(process.stdout)
+        if not report_file.exists():
+            details = process.stderr.strip()
+            raise RuntimeError(
+                "Bandit did not create a report.\n"
+                f"{details or 'No diagnostic message returned.'}"
+            )
 
-        if report.get("errors"):
-            raise RuntimeError("Bandit could not process the submitted code.")
+        try:
+            report = json.loads(
+                report_file.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "Bandit returned an unreadable report.\n"
+                f"{error}\n{process.stderr.strip()}"
+            ) from error
 
-        if not isinstance(report.get("results"), list):
-            raise RuntimeError("Bandit returned an unexpected report.")
+        if not isinstance(report, dict):
+            raise RuntimeError("Unexpected Bandit report format.")
 
-        return report["results"]
+        errors = report.get("errors", [])
+        if errors:
+            reasons = [
+                str(item.get("reason", "Unknown processing error"))
+                if isinstance(item, dict)
+                else str(item)
+                for item in errors
+            ]
+            raise RuntimeError(
+                "Bandit could not process the code:\n"
+                + "\n".join(reasons)
+            )
+
+        findings = report.get("results")
+        if not isinstance(findings, list):
+            raise RuntimeError(
+                "The Bandit report is missing its results list."
+            )
+
+        return findings
 
 
 def recommendation(check_id):
     guidance = {
         "B307": (
-            "Review the use of eval(). Avoid evaluating untrusted input. "
+            "Review eval(). Avoid evaluating untrusted input. "
             "Use a parser appropriate for the expected data format."
         ),
         "B602": (
-            "Review shell=True. Prefer an argument list with shell=False "
-            "and validate any user-controlled arguments."
+            "Review shell=True. Prefer an argument list with "
+            "shell=False and validate user-controlled arguments."
         ),
         "B608": (
-            "Review how the SQL statement is constructed. "
+            "Review the SQL statement construction. "
             "Use parameterized queries for user-supplied values."
         ),
         "B105": (
@@ -76,14 +114,14 @@ def recommendation(check_id):
         ),
         "B106": (
             "Review the apparent hard-coded password argument. "
-            "Use a suitable secrets management mechanism."
+            "Use an appropriate secrets management mechanism."
         ),
     }
 
     return guidance.get(
         check_id,
-        "Review this finding in its application context and consult "
-        "the corresponding Bandit documentation before making changes.",
+        "Review this finding in its application context and "
+        "consult the corresponding Bandit documentation.",
     )
 
 
@@ -125,8 +163,8 @@ if submitted:
             f"Python syntax error on line {error.lineno}: {error.msg}"
         )
         st.stop()
-    except (ValueError, RecursionError):
-        st.error("The input could not be parsed as Python code.")
+    except (ValueError, RecursionError, MemoryError):
+        st.error("The input could not be parsed. Try a smaller snippet.")
         st.stop()
 
     try:
@@ -135,11 +173,13 @@ if submitted:
     except subprocess.TimeoutExpired:
         st.error("Analysis timed out. Try a smaller code snippet.")
         st.stop()
-    except (RuntimeError, json.JSONDecodeError, OSError):
+    except (RuntimeError, OSError, UnicodeError) as error:
         st.error(
             "Static analysis failed. "
-            "This is not a result showing no detected issues."
+            "This does not mean the code has no security issues."
         )
+        st.write("Diagnostic details:")
+        st.code(f"{type(error).__name__}: {error}", language="text")
         st.stop()
 
     st.subheader("Static Analysis Results")
@@ -186,13 +226,13 @@ if submitted:
                 st.write(recommendation(check_id))
 
     st.caption(
-        "Severity describes the reported issue's potential seriousness. "
+        "Severity describes potential seriousness. "
         "Confidence describes Bandit's confidence in the finding; "
         "it is not an ML probability."
     )
 
     st.warning(
-        "No detected issues does not guarantee that the code is secure. "
+        "No detected issues does not guarantee secure code. "
         "Machine learning and combined results are unavailable "
         "in this version."
     )
